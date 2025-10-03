@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# cgupt - simple website blocker CLI tool (macOS + Linux)
+
+set -euo pipefail
+
+HOSTS_FILE="/etc/hosts"
+BACKUP_DIR="$HOME/.cgupt_backups"
+
+mkdir -p "$BACKUP_DIR"
+
+# ----- FUNCTIONS -----
+
+usage() {
+  cat <<EOF
+Usage:
+  cgupt block <domain1> [domain2 ...]      # Block domains
+  cgupt b <domain1> [domain2 ...]          # Shortcut for block
+  cgupt unblock <domain1> [domain2 ...]    # Unblock domains
+  cgupt ub <domain1> [domain2 ...]         # Shortcut for unblock
+  cgupt list                               # List blocked domains
+  cgupt ls                                 # Shortcut for list
+  cgupt help                               # Show this help
+  cgupt h                                  # Shortcut for help
+EOF
+  exit 1
+}
+
+backup_hosts() {
+  cp -p "$HOSTS_FILE" "$BACKUP_DIR/hosts_$(date +%s)"
+}
+
+normalize_domain() {
+  echo "$1" | sed -E 's#^https?://##; s#/.*$##'
+}
+
+flush_dns() {
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    sudo dscacheutil -flushcache
+    sudo killall -HUP mDNSResponder
+  else
+    sudo systemd-resolve --flush-caches 2>/dev/null || true
+    sudo service nscd restart 2>/dev/null || true
+  fi
+}
+
+block_domains() {
+  [ "$#" -gt 0 ] || usage
+  backup_hosts
+  for d in "$@"; do
+    dn=$(normalize_domain "$d")
+    if ! grep -qiE "127\.0\.0\.1[[:space:]]+$dn" "$HOSTS_FILE"; then
+      echo "127.0.0.1 $dn" | sudo tee -a "$HOSTS_FILE" >/dev/null
+      echo "127.0.0.1 www.$dn" | sudo tee -a "$HOSTS_FILE" >/dev/null
+      echo "Blocked: $dn"
+    else
+      echo "$dn is already blocked"
+    fi
+  done
+}
+
+unblock_domains() {
+  [ "$#" -gt 0 ] || usage
+  backup_hosts
+  for d in "$@"; do
+    dn=$(normalize_domain "$d")
+    echo "Unblocking: $dn"
+
+    # Use a temp file
+    TMP_FILE=$(mktemp)
+
+    # Keep lines that do NOT match the domain or www.domain
+    sudo awk -v domain="$dn" '
+      $0 !~ ("127\\.0\\.0\\.1[[:space:]]+"domain"$") &&
+      $0 !~ ("127\\.0\\.0\\.1[[:space:]]+www\\."domain"$")
+    ' "$HOSTS_FILE" | sudo tee "$TMP_FILE" >/dev/null
+
+    # Replace hosts file
+    sudo cp "$TMP_FILE" "$HOSTS_FILE"
+    sudo rm "$TMP_FILE"
+
+    echo "Unblocked: $dn"
+  done
+  flush_dns
+  echo "DNS cache flushed."
+}
+
+list_domains() {
+  grep -E "^127\.0\.0\.1" "$HOSTS_FILE" | awk '{print $2}' | sort | uniq
+}
+
+# ----- MAIN -----
+
+if [ "$#" -eq 0 ]; then
+  usage
+fi
+
+COMMAND="$1"
+shift || true
+
+case "$COMMAND" in
+  block|b)
+    block_domains "$@"
+    ;;
+  unblock|ub)
+    unblock_domains "$@"
+    ;;
+  list|ls)
+    list_domains
+    ;;
+  help|h)
+    usage
+    ;;
+  *)
+    usage
+    ;;
+esac
