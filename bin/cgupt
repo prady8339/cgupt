@@ -8,19 +8,27 @@ BACKUP_DIR="$HOME/.cgupt_backups"
 
 mkdir -p "$BACKUP_DIR"
 
+# Common TLDs to automatically block/unblock
+TLDS=(
+  "com" "org" "net" "in" "io" "co" "edu" "gov" "mil" "info" "biz" "us"
+  "uk" "ca" "de" "jp" "fr" "au" "ru" "ch" "it" "nl" "se" "no" "es"
+  "mx" "br" "cn" "hk" "sg" "nz" "ae" "tv" "me" "tech" "site" "online"
+  "app" "blog" "shop" "store" "club" "xyz" "life" "today" "space" "network"
+)
+
 # ----- FUNCTIONS -----
 
 usage() {
   cat <<EOF
 Usage:
-  cgupt block <domain1> [domain2 ...]      # Block domains
-  cgupt b <domain1> [domain2 ...]          # Shortcut for block
-  cgupt unblock <domain1> [domain2 ...]    # Unblock domains
-  cgupt ub <domain1> [domain2 ...]         # Shortcut for unblock
-  cgupt list                               # List blocked domains
-  cgupt ls                                 # Shortcut for list
-  cgupt help                               # Show this help
-  cgupt h                                  # Shortcut for help
+  cgupt block <name1> [name2 ...]      # Block domains (all common TLDs)
+  cgupt b <name1> [name2 ...]          # Shortcut for block
+  cgupt unblock <name1> [name2 ...]    # Unblock all TLDs
+  cgupt ub <name1> [name2 ...]         # Shortcut for unblock
+  cgupt list                           # List blocked base names
+  cgupt ls                             # Shortcut for list
+  cgupt help                           # Show this help
+  cgupt h                              # Shortcut for help
 EOF
   exit 1
 }
@@ -43,49 +51,53 @@ flush_dns() {
   fi
 }
 
+expand_domains() {
+  # Generate array of domain + www variants for all common TLDs
+  local base="$1"
+  local expanded=()
+  for tld in "${TLDS[@]}"; do
+    expanded+=("$base.$tld" "www.$base.$tld")
+  done
+  echo "${expanded[@]}"
+}
+
 block_domains() {
   [ "$#" -gt 0 ] || usage
   backup_hosts
-  for d in "$@"; do
-    dn=$(normalize_domain "$d")
-    if ! grep -qiE "127\.0\.0\.1[[:space:]]+$dn" "$HOSTS_FILE"; then
-      echo "127.0.0.1 $dn" | sudo tee -a "$HOSTS_FILE" >/dev/null
-      echo "127.0.0.1 www.$dn" | sudo tee -a "$HOSTS_FILE" >/dev/null
-      echo "Blocked: $dn"
-    else
-      echo "$dn is already blocked"
-    fi
+  for base in "$@"; do
+    for dn in $(expand_domains "$base"); do
+      if ! grep -qiE "127\.0\.0\.1[[:space:]]+$dn" "$HOSTS_FILE"; then
+        echo "127.0.0.1 $dn" | sudo tee -a "$HOSTS_FILE" >/dev/null
+      fi
+    done
+    echo "Blocked: $base"
   done
 }
 
 unblock_domains() {
   [ "$#" -gt 0 ] || usage
   backup_hosts
-  for d in "$@"; do
-    dn=$(normalize_domain "$d")
-    echo "Unblocking: $dn"
-
-    # Use a temp file
-    TMP_FILE=$(mktemp)
-
-    # Keep lines that do NOT match the domain or www.domain
-    sudo awk -v domain="$dn" '
-      $0 !~ ("127\\.0\\.0\\.1[[:space:]]+"domain"$") &&
-      $0 !~ ("127\\.0\\.0\\.1[[:space:]]+www\\."domain"$")
-    ' "$HOSTS_FILE" | sudo tee "$TMP_FILE" >/dev/null
-
-    # Replace hosts file
-    sudo cp "$TMP_FILE" "$HOSTS_FILE"
-    sudo rm "$TMP_FILE"
-
-    echo "Unblocked: $dn"
+  for base in "$@"; do
+    for dn in $(expand_domains "$base"); do
+      TMP_FILE=$(mktemp)
+      sudo awk -v domain="$dn" '
+        $0 !~ ("127\\.0\\.0\\.1[[:space:]]+"domain"$")
+      ' "$HOSTS_FILE" | sudo tee "$TMP_FILE" >/dev/null
+      sudo cp "$TMP_FILE" "$HOSTS_FILE"
+      sudo rm "$TMP_FILE"
+    done
+    echo "Unblocked: $base"
   done
   flush_dns
   echo "DNS cache flushed."
 }
 
 list_domains() {
-  grep -E "^127\.0\.0\.1" "$HOSTS_FILE" | awk '{print $2}' | sort | uniq
+  # Extract all base names ignoring www. and TLDs
+  grep -E "^127\.0\.0\.1" "$HOSTS_FILE" | awk '{print $2}' | \
+    sed -E 's/^www\.//' | \
+    sed -E 's/\.(com|org|net|in|io|co|edu|gov|mil|info|biz|us|uk|ca|de|jp|fr|au|ru|ch|it|nl|se|no|es|mx|br|cn|hk|sg|nz|ae|tv|me|tech|site|online|app|blog|shop|store|club|xyz|life|today|space|network)$//' | \
+    sort | uniq
 }
 
 # ----- MAIN -----
